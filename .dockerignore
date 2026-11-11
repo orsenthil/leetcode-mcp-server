@@ -1,0 +1,17 @@
+node_modules
+build
+.git
+.github
+.husky
+.vscode
+coverage
+tests
+*.md
+.env
+.env.*
+fly.toml
+.dockerignore
+.gitignore
+eslint.config.js
+prettier.config.js
+vitest.config.ts

@@ -36,9 +36,6 @@ function parseArgs() {
             c: "session",
             h: "help",
             t: "transport"
-        },
-        default: {
-            port: 3000
         }
     });
 

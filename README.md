@@ -173,6 +173,74 @@ npx -y @jinzcdev/leetcode-mcp-server --transport http --port 3000 --site global 
 > - If `LEETCODE_SITE=cn` is set but you run `leetcode-mcp-server --site global`, the server will use `global`.
 > - If `LEETCODE_SESSION` exists but you provide `--session "new_cookie"`, the command-line session value will be used.
 
+### Deploy to Fly.io
+
+The repository includes a `Dockerfile` and `fly.toml` configured for Streamable HTTP on Fly.io. The container listens on `0.0.0.0:8080` and serves MCP at `/mcp`.
+
+#### Prerequisites
+
+1. [flyctl](https://fly.io/docs/flyctl/install/) installed
+2. A Fly.io account (`fly auth login`)
+
+#### Deploy
+
+From the repository root:
+
+```bash
+# Create the app (skip if fly.toml already points at an existing app)
+fly apps create leetcode-mcp-server
+
+# Deploy a single machine (recommended: MCP sessions are stored in memory)
+fly deploy --ha=false --smoke-checks=false
+```
+
+After deploy, the MCP endpoint is:
+
+```text
+https://<app-name>.fly.dev/mcp
+```
+
+For example: `https://leetcode-mcp-server.fly.dev/mcp`.
+
+#### Authenticated access
+
+Set the LeetCode session as a Fly secret (never commit it):
+
+```bash
+fly secrets set LEETCODE_SESSION='<YOUR_LEETCODE_SESSION_COOKIE>'
+```
+
+Optionally override the site:
+
+```bash
+fly secrets set LEETCODE_SITE=cn
+```
+
+Fly restarts the machine when secrets change so the new values take effect immediately.
+
+#### MCP client configuration
+
+```json
+{
+  "mcpServers": {
+    "leetcode": {
+      "type": "http",
+      "url": "https://leetcode-mcp-server.fly.dev/mcp"
+    }
+  }
+}
+```
+
+Replace the hostname with your app's `*.fly.dev` URL if you used a different app name.
+
+> [!WARNING]
+>
+> A public Fly URL with `LEETCODE_SESSION` set allows anyone who can reach the endpoint to use your authenticated LeetCode session. Prefer keeping the app private (for example Flycast / private networking), adding your own access control, or omitting the session secret if you only need public tools.
+
+> [!NOTE]
+>
+> Keep `--ha=false` (one machine) unless you add shared session state. This server stores Streamable HTTP sessions in memory on the process that handled `initialize`.
+
 ## Available Tools
 
 ### Problems

@@ -1,0 +1,37 @@
+# fly.toml app configuration file generated for leetcode-mcp-server
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+
+app = "leetcode-mcp-server"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  LEETCODE_SITE = "global"
+  LEETCODE_TRANSPORT = "http"
+  LEETCODE_HTTP_HOST = "0.0.0.0"
+  LEETCODE_HTTP_PORT = "8080"
+  LEETCODE_HTTP_ENDPOINT = "/mcp"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 20
+    hard_limit = 25
+
+  [http_service.http_options]
+    idle_timeout = 600
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
