@@ -261,101 +261,128 @@ npx -y @jinzcdev/leetcode-mcp-server --transport http --port 3000
 
 ### Deploy to Fly.io
 
-The repository includes a `Dockerfile` and `fly.toml` configured for Streamable HTTP on Fly.io. The container listens on `0.0.0.0:8080` and serves MCP at `/mcp`.
+The repository includes a `Dockerfile` and `fly.toml` configured for Streamable HTTP on Fly.io. The container listens on `0.0.0.0:8080` and serves MCP at `/mcp`, for example `https://leetcode-mcp-server.fly.dev/mcp`.
+
+Your `*.fly.dev` URL is public, so the server should never run with your LeetCode session and no authentication. It supports two kinds of authentication, and you can enable both:
+
+- **Bearer token** (`LEETCODE_HTTP_AUTH_TOKEN`) for clients that can send an `Authorization` header, such as Claude Code.
+- **OAuth** (`LEETCODE_OAUTH_PASSWORD` and `LEETCODE_OAUTH_SIGNING_KEY`) for clients that only support OAuth, such as ChatGPT.
 
 #### Prerequisites
 
 1. [flyctl](https://fly.io/docs/flyctl/install/) installed
 2. A Fly.io account (`fly auth login`)
 
-#### Deploy
+#### First-time setup
 
-From the repository root:
+1. Create the app. If you choose a name other than `leetcode-mcp-server`, set `app` and `LEETCODE_OAUTH_ISSUER_URL` in `fly.toml` to match (for example `https://<app-name>.fly.dev`).
+
+   ```bash
+   fly apps create leetcode-mcp-server
+   ```
+
+2. Generate and stage every secret **before** the first deploy, so the server never runs unprotected. `--stage` stores the secrets without restarting anything.
+
+   ```bash
+   AUTH_TOKEN="$(openssl rand -hex 32)"
+   OAUTH_PASSWORD="$(openssl rand -base64 24)"
+
+   fly secrets set --stage \
+     LEETCODE_HTTP_AUTH_TOKEN="$AUTH_TOKEN" \
+     LEETCODE_OAUTH_PASSWORD="$OAUTH_PASSWORD" \
+     LEETCODE_OAUTH_SIGNING_KEY="$(openssl rand -hex 32)" \
+     LEETCODE_SESSION='<YOUR_LEETCODE_SESSION_COOKIE>'
+
+   echo "Bearer token:   $AUTH_TOKEN"
+   echo "OAuth password: $OAUTH_PASSWORD"
+   ```
+
+   Save the bearer token and the OAuth password in your password manager. Fly never shows secret values again. You don't need to save the signing key, because no client ever uses it directly.
+
+   Leave out the variables for the kind of authentication you don't need. To use the leetcode.cn site, also set `LEETCODE_SITE=cn`.
+
+3. Deploy one machine. Keep `--ha=false`, because MCP sessions are held in memory on the machine that started them.
+
+   ```bash
+   fly deploy --ha=false --smoke-checks=false
+   ```
+
+4. Check the deployment (see [Verify a deployment](#verify-a-deployment)), then [connect your clients](#connect-clients).
+
+#### Redeploying
+
+Use this after pulling new code or editing `fly.toml`. Secrets are stored by Fly and carry over to every deploy, so **don't set them again**. Generating a new signing key or password would disconnect ChatGPT and change the password you type.
 
 ```bash
-# Create the app (skip if fly.toml already points at an existing app)
-fly apps create leetcode-mcp-server
-
-# Deploy a single machine (recommended: MCP sessions are stored in memory)
+git pull
+fly secrets list    # names should include LEETCODE_HTTP_AUTH_TOKEN and/or LEETCODE_OAUTH_PASSWORD + LEETCODE_OAUTH_SIGNING_KEY
 fly deploy --ha=false --smoke-checks=false
 ```
 
-After deploy, the MCP endpoint is:
+Connected clients keep working after a redeploy. OAuth tokens are signed with `LEETCODE_OAUTH_SIGNING_KEY`, not stored on the machine, so ChatGPT doesn't need to reconnect as long as that key doesn't change.
 
-```text
-https://<app-name>.fly.dev/mcp
-```
-
-For example: `https://leetcode-mcp-server.fly.dev/mcp`.
-
-#### Secure the endpoint with a bearer token
-
-Your `*.fly.dev` URL is public. Set a bearer token **before** you add your LeetCode session:
+#### Verify a deployment
 
 ```bash
-TOKEN="$(openssl rand -hex 32)"
-fly secrets set LEETCODE_HTTP_AUTH_TOKEN="$TOKEN"
-echo "$TOKEN"   # save this in your password manager; Fly will not show it again
+APP=https://leetcode-mcp-server.fly.dev
+
+# OAuth discovery: should print JSON with "resource": "$APP/mcp"
+curl -s "$APP/.well-known/oauth-protected-resource/mcp"
+
+# Unauthenticated requests must be rejected: should print 401
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$APP/mcp" \
+  -H 'Content-Type: application/json' -d '{}'
+
+# Server logs: look for "OAuth enabled" and/or "Bearer token authentication enabled"
+fly logs --no-tail | grep -E 'OAuth enabled|Bearer token'
 ```
 
-To rotate the token, run `fly secrets set` again with a new value and update your clients.
+If the second command prints anything other than `401`, no authentication is enabled. Set the secrets before using the server.
 
-#### Enable OAuth (for ChatGPT)
+#### Changing secrets
 
-`fly.toml` already sets `LEETCODE_OAUTH_ISSUER_URL` to `https://leetcode-mcp-server.fly.dev` and `LEETCODE_HTTP_TRUST_PROXY=1`. If your app has a different name, change the issuer URL there first. Then set the two OAuth secrets:
+Running `fly secrets set` without `--stage` updates the value and restarts the machine; you don't need to run `fly deploy`. A restart drops open MCP sessions, and clients reconnect automatically.
 
-```bash
-PASSWORD="$(openssl rand -base64 24)"
-fly secrets set \
-  LEETCODE_OAUTH_PASSWORD="$PASSWORD" \
-  LEETCODE_OAUTH_SIGNING_KEY="$(openssl rand -hex 32)"
-echo "$PASSWORD"   # save this in your password manager; you type it each time you connect a client
-fly deploy --ha=false --smoke-checks=false
-```
+| What you change                              | Command                                                                                    | Effect                                                                |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| LeetCode cookie (it expires every few weeks) | `fly secrets set LEETCODE_SESSION='<NEW_COOKIE>'`                                          | Authenticated tools work again. Clients stay connected.               |
+| Bearer token                                 | `fly secrets set LEETCODE_HTTP_AUTH_TOKEN="$(openssl rand -hex 32)"`                       | Update the header in every client that uses the token.                |
+| OAuth password                               | `fly secrets set LEETCODE_OAUTH_PASSWORD='<NEW_PASSWORD>'`                                 | Affects new approvals only. Clients already connected stay connected. |
+| OAuth signing key                            | `fly secrets set LEETCODE_OAUTH_SIGNING_KEY="$(openssl rand -hex 32)"`                     | Revokes every OAuth client. Reconnect ChatGPT and approve again.      |
+| Turn off OAuth or the bearer token           | `fly secrets unset LEETCODE_OAUTH_PASSWORD` / `fly secrets unset LEETCODE_HTTP_AUTH_TOKEN` | That kind of authentication stops being accepted.                     |
 
-Check that discovery works:
+#### Connect clients
 
-```bash
-curl https://leetcode-mcp-server.fly.dev/.well-known/oauth-protected-resource/mcp
-```
+##### ChatGPT (OAuth)
 
-Then add the server in ChatGPT's **Add custom MCP server** dialog:
+In ChatGPT's **Add custom MCP server** dialog:
 
 1. **Connection:** Server URL `https://leetcode-mcp-server.fly.dev/mcp`
-2. **Authentication:** OAuth. Open **Advanced OAuth settings** and click **Retry discovery**. ChatGPT should now find the endpoints.
+2. **Authentication:** OAuth. Open **Advanced OAuth settings** and click **Retry discovery**. ChatGPT should find the endpoints.
 3. **Registration method:** choose **Dynamic Client Registration (DCR)**. ChatGPT registers itself and you don't need to set anything else.
-4. Create the connector. ChatGPT opens this server's **Authorize LeetCode MCP** page. Enter your password and click **Approve**.
+4. Create the connector. ChatGPT opens this server's **Authorize LeetCode MCP** page. Enter your OAuth password and click **Approve**.
 
-If you'd rather use **User-Defined OAuth Client**, copy the **Callback URL** from the dialog and set the client on the server:
+If you'd rather use **User-Defined OAuth Client**, copy the **Callback URL** from the dialog and set a client on the server:
 
 ```bash
+CLIENT_SECRET="$(openssl rand -hex 32)"
 fly secrets set \
   LEETCODE_OAUTH_CLIENT_ID="chatgpt" \
-  LEETCODE_OAUTH_CLIENT_SECRET="$(openssl rand -hex 32 | tee /dev/tty)" \
+  LEETCODE_OAUTH_CLIENT_SECRET="$CLIENT_SECRET" \
   LEETCODE_OAUTH_REDIRECT_URIS="<CALLBACK_URL_FROM_CHATGPT>"
+echo "$CLIENT_SECRET"
 ```
 
 Enter the same client ID and secret in ChatGPT, and set **Token endpoint auth method** to `client_secret_post`.
 
-To revoke every connected client, set a new `LEETCODE_OAUTH_SIGNING_KEY`. To stop new approvals, change `LEETCODE_OAUTH_PASSWORD`.
-
-#### Authenticated access
-
-Set the LeetCode session as a Fly secret (never commit it):
+##### Claude Code and other clients that send headers (bearer token)
 
 ```bash
-fly secrets set LEETCODE_SESSION='<YOUR_LEETCODE_SESSION_COOKIE>'
+claude mcp add --transport http leetcode https://leetcode-mcp-server.fly.dev/mcp \
+  --header "Authorization: Bearer <YOUR_TOKEN>"
 ```
 
-Optionally override the site:
-
-```bash
-fly secrets set LEETCODE_SITE=cn
-```
-
-Fly restarts the machine when secrets change so the new values take effect immediately.
-
-#### MCP client configuration
+Or in a JSON client config:
 
 ```json
 {
@@ -371,22 +398,11 @@ Fly restarts the machine when secrets change so the new values take effect immed
 }
 ```
 
-Or with Claude Code:
-
-```bash
-claude mcp add --transport http leetcode https://leetcode-mcp-server.fly.dev/mcp \
-  --header "Authorization: Bearer <YOUR_TOKEN>"
-```
-
 Replace the hostname with your app's `*.fly.dev` URL if you used a different app name.
 
 > [!WARNING]
 >
-> Without `LEETCODE_HTTP_AUTH_TOKEN` or OAuth, a public Fly URL with `LEETCODE_SESSION` set lets anyone who can reach the endpoint use your authenticated LeetCode session, including submitting code and editing notes and lists. Always set the token or enable OAuth, or keep the app private (for example Flycast / private networking).
-
-> [!NOTE]
->
-> Keep `--ha=false` (one machine) unless you add shared session state. This server stores Streamable HTTP sessions in memory on the process that handled `initialize`.
+> Without `LEETCODE_HTTP_AUTH_TOKEN` or OAuth, a public Fly URL with `LEETCODE_SESSION` set lets anyone who can reach the endpoint use your authenticated LeetCode session, including submitting code and editing notes and lists. Always enable at least one of them, or keep the app private (for example Flycast / private networking).
 
 ## Available Tools
 
