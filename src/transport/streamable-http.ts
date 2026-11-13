@@ -4,7 +4,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createOAuth, type OAuthConfig } from "../auth/oauth-router.js";
 import logger from "../utils/logger.js";
+import { createBearerAuthMiddleware } from "./bearer-auth.js";
 
 type McpRequest = IncomingMessage & { body?: unknown };
 type McpResponse = ServerResponse & {
@@ -17,6 +19,12 @@ export interface StreamableHttpOptions {
     host: string;
     port: number;
     endpoint: string;
+    /** When set, every request to the endpoint must send `Authorization: Bearer <authToken>`. */
+    authToken?: string;
+    /** When set, the server acts as an OAuth 2.1 authorization server and requires OAuth access tokens (or `authToken`). */
+    oauth?: OAuthConfig;
+    /** Number of reverse-proxy hops to trust for the client IP (e.g. 1 on Fly.io). */
+    trustProxy?: number;
     createServer: () => Promise<McpServer> | McpServer;
 }
 
@@ -29,8 +37,12 @@ export interface StreamableHttpOptions {
 export async function startStreamableHttpTransport(
     options: StreamableHttpOptions
 ): Promise<void> {
-    const { host, port, endpoint, createServer } = options;
+    const { host, port, endpoint, authToken, oauth, trustProxy, createServer } =
+        options;
     const app = createMcpExpressApp({ host });
+    if (trustProxy) {
+        app.set("trust proxy", trustProxy);
+    }
     const transports: Record<string, StreamableHTTPServerTransport> = {};
 
     const mcpPostHandler = async (req: McpRequest, res: McpResponse) => {
@@ -122,6 +134,27 @@ export async function startStreamableHttpTransport(
             }
         }
     };
+
+    if (oauth) {
+        const { router, protect } = createOAuth(oauth, endpoint, authToken);
+        app.use(router);
+        app.use(endpoint, protect);
+        logger.info(
+            "OAuth enabled: issuer %s, protecting %s%s",
+            oauth.issuerUrl.href,
+            endpoint,
+            authToken ? " (static bearer token also accepted)" : ""
+        );
+    } else if (authToken) {
+        app.use(endpoint, createBearerAuthMiddleware(authToken));
+        logger.info("Bearer token authentication enabled for %s", endpoint);
+    } else if (!["127.0.0.1", "localhost", "::1"].includes(host)) {
+        logger.warn(
+            "No auth token configured and listening on %s: anyone who can reach %s can use this server. Set LEETCODE_HTTP_AUTH_TOKEN or --auth-token.",
+            host,
+            endpoint
+        );
+    }
 
     app.post(endpoint, mcpPostHandler);
     app.get(endpoint, mcpGetHandler);

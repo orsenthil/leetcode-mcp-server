@@ -70,14 +70,15 @@ The server supports two transport modes:
 
 ### Command-Line Options
 
-| Option        | Alias | Default     | Description                                                      |
-| ------------- | ----- | ----------- | ---------------------------------------------------------------- |
-| `--site`      | `-s`  | `global`    | LeetCode API site: `global` (leetcode.com) or `cn` (leetcode.cn) |
-| `--session`   | `-c`  | —           | LeetCode session cookie for authenticated requests               |
-| `--transport` | `-t`  | `stdio`     | Transport mode: `stdio` or `http`                                |
-| `--port`      | —     | `3000`      | HTTP server port (Streamable HTTP only)                          |
-| `--host`      | —     | `127.0.0.1` | HTTP server host (Streamable HTTP only)                          |
-| `--endpoint`  | —     | `/mcp`      | HTTP endpoint path (Streamable HTTP only)                        |
+| Option         | Alias | Default     | Description                                                      |
+| -------------- | ----- | ----------- | ---------------------------------------------------------------- |
+| `--site`       | `-s`  | `global`    | LeetCode API site: `global` (leetcode.com) or `cn` (leetcode.cn) |
+| `--session`    | `-c`  | —           | LeetCode session cookie for authenticated requests               |
+| `--transport`  | `-t`  | `stdio`     | Transport mode: `stdio` or `http`                                |
+| `--port`       | —     | `3000`      | HTTP server port (Streamable HTTP only)                          |
+| `--host`       | —     | `127.0.0.1` | HTTP server host (Streamable HTTP only)                          |
+| `--endpoint`   | —     | `/mcp`      | HTTP endpoint path (Streamable HTTP only)                        |
+| `--auth-token` | —     | —           | Require `Authorization: Bearer <token>` (Streamable HTTP only)   |
 
 ### MCP Client Configuration (stdio)
 
@@ -153,6 +154,89 @@ To use authenticated endpoints, pass the session cookie when starting the server
 npx -y @jinzcdev/leetcode-mcp-server --transport http --port 3000 --site global --session <YOUR_LEETCODE_SESSION_COOKIE>
 ```
 
+#### Bearer token authentication
+
+Anyone who can reach the HTTP endpoint can call every tool, including `submit_solution` and the note and list tools, using your LeetCode session. If the server listens on anything other than localhost, require a bearer token.
+
+Generate a random token and start the server with it:
+
+```bash
+export LEETCODE_HTTP_AUTH_TOKEN="$(openssl rand -hex 32)"
+npx -y @jinzcdev/leetcode-mcp-server --transport http --port 3000 --site global
+# or pass it explicitly: --auth-token "$LEETCODE_HTTP_AUTH_TOKEN"
+```
+
+Prefer the environment variable over `--auth-token`, because command-line arguments are visible to other users in the process list.
+
+Every request to the endpoint must then send the token. Requests with a missing or wrong token get `401 Unauthorized`. Configure your client to send the header:
+
+```json
+{
+  "mcpServers": {
+    "leetcode": {
+      "type": "http",
+      "url": "http://127.0.0.1:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+With Claude Code you can add it from the command line:
+
+```bash
+claude mcp add --transport http leetcode http://127.0.0.1:3000/mcp \
+  --header "Authorization: Bearer $LEETCODE_HTTP_AUTH_TOKEN"
+```
+
+To check the token with curl:
+
+```bash
+curl -i -X POST http://127.0.0.1:3000/mcp \
+  -H "Authorization: Bearer $LEETCODE_HTTP_AUTH_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+```
+
+If no token is set and the server listens on a non-localhost address, it logs a warning at startup.
+
+#### OAuth authentication
+
+Some clients, such as ChatGPT's custom MCP connectors, can't send a fixed `Authorization` header and only support OAuth. For them, the server can act as its own single-user OAuth 2.1 authorization server:
+
+- **Discovery:** it serves `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`, so clients find the settings automatically.
+- **Clients:** they can register themselves with Dynamic Client Registration (`/register`), or you can configure one client yourself (client ID, secret and redirect URI).
+- **Approval:** when a client connects, you're sent to a page on this server where you type a password you chose. Only someone who knows the password can approve a client.
+- **Tokens:** PKCE (S256) is required. Access tokens last 1 hour and refresh tokens 30 days.
+- **Restarts:** tokens, codes and registered client IDs are signed with a key you provide, not stored, so they survive restarts. Changing the signing key revokes everything at once.
+- **Static token:** if `LEETCODE_HTTP_AUTH_TOKEN` is also set, that token keeps working alongside OAuth, so clients that send a fixed header (like Claude Code) don't need to change.
+
+OAuth is turned on by setting `LEETCODE_OAUTH_PASSWORD`. These settings are read only from environment variables, never from command-line arguments:
+
+| Variable                       | Required | Description                                                                                                      |
+| ------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------- |
+| `LEETCODE_OAUTH_PASSWORD`      | yes      | Password you type on the approval page. Use a long random value.                                                 |
+| `LEETCODE_OAUTH_SIGNING_KEY`   | yes      | Secret of at least 32 characters used to sign tokens and client IDs.                                             |
+| `LEETCODE_OAUTH_ISSUER_URL`    | yes      | Public base URL of the server, with no path, e.g. `https://my-app.fly.dev`. Must be HTTPS except on `localhost`. |
+| `LEETCODE_OAUTH_CLIENT_ID`     | no       | ID of a client you configure yourself.                                                                           |
+| `LEETCODE_OAUTH_CLIENT_SECRET` | no       | Secret for that client. Clients send it with `client_secret_post`.                                               |
+| `LEETCODE_OAUTH_REDIRECT_URIS` | with ID  | Comma-separated callback URL(s) for that client.                                                                 |
+| `LEETCODE_HTTP_TRUST_PROXY`    | no       | Reverse-proxy hops in front of the server (`1` on Fly.io), so the password rate limit sees real client IPs.      |
+
+Wrong passwords are limited to 10 attempts per IP every 15 minutes.
+
+To try it locally:
+
+```bash
+export LEETCODE_OAUTH_PASSWORD="$(openssl rand -base64 24)"
+export LEETCODE_OAUTH_SIGNING_KEY="$(openssl rand -hex 32)"
+export LEETCODE_OAUTH_ISSUER_URL="http://localhost:3000"
+npx -y @jinzcdev/leetcode-mcp-server --transport http --port 3000
+```
+
 > [!NOTE]
 > Some MCP clients use `"type": "http"` or `"type": "streamableHttp"` alongside the `url` field. Refer to your client's documentation for the exact HTTP transport configuration format.
 
@@ -166,6 +250,8 @@ npx -y @jinzcdev/leetcode-mcp-server --transport http --port 3000 --site global 
 > - `LEETCODE_HTTP_PORT`: HTTP server port when using Streamable HTTP (default: `3000`)
 > - `LEETCODE_HTTP_HOST`: HTTP server host when using Streamable HTTP (default: `127.0.0.1`)
 > - `LEETCODE_HTTP_ENDPOINT`: HTTP endpoint path when using Streamable HTTP (default: `/mcp`)
+> - `LEETCODE_HTTP_AUTH_TOKEN`: Bearer token required on the HTTP endpoint (default: empty, no auth)
+> - `LEETCODE_OAUTH_*` and `LEETCODE_HTTP_TRUST_PROXY`: OAuth settings, see [OAuth authentication](#oauth-authentication)
 >
 > **Priority Note**:
 > Command-line arguments take precedence over environment variables when both are specified. For example:
@@ -202,6 +288,57 @@ https://<app-name>.fly.dev/mcp
 
 For example: `https://leetcode-mcp-server.fly.dev/mcp`.
 
+#### Secure the endpoint with a bearer token
+
+Your `*.fly.dev` URL is public. Set a bearer token **before** you add your LeetCode session:
+
+```bash
+TOKEN="$(openssl rand -hex 32)"
+fly secrets set LEETCODE_HTTP_AUTH_TOKEN="$TOKEN"
+echo "$TOKEN"   # save this in your password manager; Fly will not show it again
+```
+
+To rotate the token, run `fly secrets set` again with a new value and update your clients.
+
+#### Enable OAuth (for ChatGPT)
+
+`fly.toml` already sets `LEETCODE_OAUTH_ISSUER_URL` to `https://leetcode-mcp-server.fly.dev` and `LEETCODE_HTTP_TRUST_PROXY=1`. If your app has a different name, change the issuer URL there first. Then set the two OAuth secrets:
+
+```bash
+PASSWORD="$(openssl rand -base64 24)"
+fly secrets set \
+  LEETCODE_OAUTH_PASSWORD="$PASSWORD" \
+  LEETCODE_OAUTH_SIGNING_KEY="$(openssl rand -hex 32)"
+echo "$PASSWORD"   # save this in your password manager; you type it each time you connect a client
+fly deploy --ha=false --smoke-checks=false
+```
+
+Check that discovery works:
+
+```bash
+curl https://leetcode-mcp-server.fly.dev/.well-known/oauth-protected-resource/mcp
+```
+
+Then add the server in ChatGPT's **Add custom MCP server** dialog:
+
+1. **Connection:** Server URL `https://leetcode-mcp-server.fly.dev/mcp`
+2. **Authentication:** OAuth. Open **Advanced OAuth settings** and click **Retry discovery**. ChatGPT should now find the endpoints.
+3. **Registration method:** choose **Dynamic Client Registration (DCR)**. ChatGPT registers itself and you don't need to set anything else.
+4. Create the connector. ChatGPT opens this server's **Authorize LeetCode MCP** page. Enter your password and click **Approve**.
+
+If you'd rather use **User-Defined OAuth Client**, copy the **Callback URL** from the dialog and set the client on the server:
+
+```bash
+fly secrets set \
+  LEETCODE_OAUTH_CLIENT_ID="chatgpt" \
+  LEETCODE_OAUTH_CLIENT_SECRET="$(openssl rand -hex 32 | tee /dev/tty)" \
+  LEETCODE_OAUTH_REDIRECT_URIS="<CALLBACK_URL_FROM_CHATGPT>"
+```
+
+Enter the same client ID and secret in ChatGPT, and set **Token endpoint auth method** to `client_secret_post`.
+
+To revoke every connected client, set a new `LEETCODE_OAUTH_SIGNING_KEY`. To stop new approvals, change `LEETCODE_OAUTH_PASSWORD`.
+
 #### Authenticated access
 
 Set the LeetCode session as a Fly secret (never commit it):
@@ -225,17 +362,27 @@ Fly restarts the machine when secrets change so the new values take effect immed
   "mcpServers": {
     "leetcode": {
       "type": "http",
-      "url": "https://leetcode-mcp-server.fly.dev/mcp"
+      "url": "https://leetcode-mcp-server.fly.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_TOKEN>"
+      }
     }
   }
 }
+```
+
+Or with Claude Code:
+
+```bash
+claude mcp add --transport http leetcode https://leetcode-mcp-server.fly.dev/mcp \
+  --header "Authorization: Bearer <YOUR_TOKEN>"
 ```
 
 Replace the hostname with your app's `*.fly.dev` URL if you used a different app name.
 
 > [!WARNING]
 >
-> A public Fly URL with `LEETCODE_SESSION` set allows anyone who can reach the endpoint to use your authenticated LeetCode session. Prefer keeping the app private (for example Flycast / private networking), adding your own access control, or omitting the session secret if you only need public tools.
+> Without `LEETCODE_HTTP_AUTH_TOKEN` or OAuth, a public Fly URL with `LEETCODE_SESSION` set lets anyone who can reach the endpoint use your authenticated LeetCode session, including submitting code and editing notes and lists. Always set the token or enable OAuth, or keep the app private (for example Flycast / private networking).
 
 > [!NOTE]
 >

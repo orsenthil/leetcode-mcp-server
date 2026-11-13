@@ -14,6 +14,11 @@ primary_region = "sjc"
   LEETCODE_HTTP_HOST = "0.0.0.0"
   LEETCODE_HTTP_PORT = "8080"
   LEETCODE_HTTP_ENDPOINT = "/mcp"
+  # Fly's edge proxy is one hop in front of the app; needed for per-IP rate limits.
+  LEETCODE_HTTP_TRUST_PROXY = "1"
+  # Public URL used as the OAuth issuer. Change it if you use a different app name.
+  # OAuth itself only turns on when the LEETCODE_OAUTH_PASSWORD secret is set.
+  LEETCODE_OAUTH_ISSUER_URL = "https://leetcode-mcp-server.fly.dev"
 
 [http_service]
   internal_port = 8080

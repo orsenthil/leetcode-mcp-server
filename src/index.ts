@@ -5,6 +5,7 @@ import minimist from "minimist";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { OAuthConfig } from "./auth/oauth-router.js";
 import { MAX_TOOL_INPUT_ARRAY_ITEMS } from "./common/constants.js";
 import { LeetCodeBaseService } from "./leetcode/leetcode-base-service.js";
 import { LeetCodeServiceFactory } from "./leetcode/leetcode-service-factory.js";
@@ -29,7 +30,14 @@ type TransportMode = "stdio" | "http";
  */
 function parseArgs() {
     const args = minimist(process.argv.slice(2), {
-        string: ["site", "session", "transport", "host", "endpoint"],
+        string: [
+            "site",
+            "session",
+            "transport",
+            "host",
+            "endpoint",
+            "auth-token"
+        ],
         boolean: ["help"],
         alias: {
             s: "site",
@@ -51,6 +59,7 @@ function parseArgs() {
     --port <port>                  HTTP server port when using Streamable HTTP transport (default: 3000)
     --host <host>                  HTTP server host when using Streamable HTTP transport (default: 127.0.0.1)
     --endpoint <path>              HTTP endpoint path when using Streamable HTTP transport (default: /mcp)
+    --auth-token <token>           Require 'Authorization: Bearer <token>' on the HTTP endpoint (Streamable HTTP only)
     --help, -h                     Show this help message
 
   Environment variables:
@@ -59,7 +68,17 @@ function parseArgs() {
     LEETCODE_TRANSPORT             Same as --transport
     LEETCODE_HTTP_PORT             Same as --port
     LEETCODE_HTTP_HOST             Same as --host
-    LEETCODE_HTTP_ENDPOINT         Same as --endpoint`);
+    LEETCODE_HTTP_ENDPOINT         Same as --endpoint
+    LEETCODE_HTTP_AUTH_TOKEN       Same as --auth-token
+    LEETCODE_HTTP_TRUST_PROXY      Number of reverse-proxy hops to trust for client IPs (e.g. 1 on Fly.io)
+
+  OAuth (Streamable HTTP only; enabled when LEETCODE_OAUTH_PASSWORD is set):
+    LEETCODE_OAUTH_PASSWORD        Password you type to approve a client
+    LEETCODE_OAUTH_SIGNING_KEY     Secret (32+ chars) used to sign tokens and client IDs
+    LEETCODE_OAUTH_ISSUER_URL      Public base URL of this server, e.g. https://my-app.fly.dev
+    LEETCODE_OAUTH_CLIENT_ID       Optional pre-configured client ID
+    LEETCODE_OAUTH_CLIENT_SECRET   Optional pre-configured client secret
+    LEETCODE_OAUTH_REDIRECT_URIS   Comma-separated redirect URIs for the pre-configured client`);
         process.exit(0);
     }
 
@@ -73,7 +92,14 @@ function parseArgs() {
         transport,
         port: Number(args.port || process.env.LEETCODE_HTTP_PORT || 3000),
         host: args.host || process.env.LEETCODE_HTTP_HOST || "127.0.0.1",
-        endpoint: args.endpoint || process.env.LEETCODE_HTTP_ENDPOINT || "/mcp"
+        endpoint: args.endpoint || process.env.LEETCODE_HTTP_ENDPOINT || "/mcp",
+        trustProxy: Number(process.env.LEETCODE_HTTP_TRUST_PROXY || 0),
+        oauth: parseOAuthConfig(),
+        authToken: (
+            args["auth-token"] ||
+            process.env.LEETCODE_HTTP_AUTH_TOKEN ||
+            ""
+        ).trim()
     };
 
     if (options.site !== "global" && options.site !== "cn") {
@@ -101,6 +127,66 @@ function parseArgs() {
     }
 
     return options;
+}
+
+/**
+ * Reads OAuth settings from the environment. OAuth is enabled when
+ * LEETCODE_OAUTH_PASSWORD is set; secrets are only read from the environment so
+ * they never show up in the process list.
+ */
+function parseOAuthConfig(): OAuthConfig | undefined {
+    const env = process.env;
+    const password = env.LEETCODE_OAUTH_PASSWORD?.trim();
+    if (!password) {
+        return undefined;
+    }
+
+    const fail = (message: string): never => {
+        logger.error(message);
+        process.exit(1);
+    };
+
+    const signingKey = env.LEETCODE_OAUTH_SIGNING_KEY?.trim() ?? "";
+    if (signingKey.length < 32) {
+        fail(
+            "LEETCODE_OAUTH_SIGNING_KEY must be set to at least 32 characters when OAuth is enabled"
+        );
+    }
+
+    const issuer = env.LEETCODE_OAUTH_ISSUER_URL?.trim();
+    if (!issuer || !URL.canParse(issuer)) {
+        fail(
+            "LEETCODE_OAUTH_ISSUER_URL must be set to this server's public URL (e.g. https://my-app.fly.dev) when OAuth is enabled"
+        );
+    }
+    const issuerUrl = new URL(issuer!);
+    if (issuerUrl.pathname !== "/" || issuerUrl.search || issuerUrl.hash) {
+        fail("LEETCODE_OAUTH_ISSUER_URL must be a bare origin without a path");
+    }
+
+    const clientId = env.LEETCODE_OAUTH_CLIENT_ID?.trim();
+    let staticClient: OAuthConfig["staticClient"];
+    if (clientId) {
+        const redirectUris = (env.LEETCODE_OAUTH_REDIRECT_URIS ?? "")
+            .split(",")
+            .map((uri) => uri.trim())
+            .filter(Boolean);
+        if (
+            redirectUris.length === 0 ||
+            !redirectUris.every((u) => URL.canParse(u))
+        ) {
+            fail(
+                "LEETCODE_OAUTH_REDIRECT_URIS must list the client's callback URL(s) when LEETCODE_OAUTH_CLIENT_ID is set"
+            );
+        }
+        staticClient = {
+            clientId,
+            clientSecret: env.LEETCODE_OAUTH_CLIENT_SECRET?.trim() || undefined,
+            redirectUris
+        };
+    }
+
+    return { issuerUrl, password, signingKey, staticClient };
 }
 
 /**
@@ -180,6 +266,9 @@ async function main() {
             host: options.host,
             port: options.port,
             endpoint: options.endpoint,
+            authToken: options.authToken || undefined,
+            oauth: options.oauth,
+            trustProxy: options.trustProxy,
             createServer: () => createMcpServer(leetcodeService)
         });
         return;
