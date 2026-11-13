@@ -4,12 +4,70 @@ import { PROGRAMMING_LANGS } from "../../common/constants.js";
 import { LeetCodeBaseService } from "../../leetcode/leetcode-base-service.js";
 import { ToolRegistry } from "./tool-registry.js";
 
+function jsonText(value: unknown) {
+    return {
+        content: [{ type: "text" as const, text: JSON.stringify(value) }]
+    };
+}
+
 /**
  * User tool registry class that handles registration of LeetCode user-related tools.
  * This class manages tools for accessing user profiles, submissions, and progress data.
  */
 export class UserToolRegistry extends ToolRegistry {
     protected registerCommon(): void {
+        this.server.tool(
+            "get_session_status",
+            "Reports whether the server's LeetCode session cookie (LEETCODE_SESSION) is configured, when it expires, and whether LeetCode still accepts it (read-only). Use it when authenticated tools fail unexpectedly, or to check how long until the cookie must be renewed.",
+            {},
+            async () => {
+                const info = this.leetcodeService.inspectSession();
+                if (!info) {
+                    return jsonText({
+                        configured: false,
+                        advice: "No LEETCODE_SESSION is configured, so only public tools are available. Set LEETCODE_SESSION to your LeetCode session cookie to enable account tools."
+                    });
+                }
+
+                let signedIn: boolean | undefined;
+                let username: string | undefined;
+                let checkError: string | undefined;
+                try {
+                    const status = await this.leetcodeService.fetchUserStatus();
+                    signedIn = !!status?.isSignedIn;
+                    username = status?.username || undefined;
+                } catch (error: any) {
+                    checkError = error.message;
+                }
+
+                let advice: string;
+                if (signedIn === false || info.expired) {
+                    advice =
+                        "The session no longer works. Copy a fresh LEETCODE_SESSION cookie from your browser and update the server (on Fly.io: fly secrets set LEETCODE_SESSION='<cookie>').";
+                } else if (info.daysLeft !== undefined && info.daysLeft <= 7) {
+                    advice = `The session expires in ${info.daysLeft} day(s). Renew LEETCODE_SESSION soon.`;
+                } else if (signedIn) {
+                    advice = "The session is valid.";
+                } else {
+                    advice =
+                        "Could not confirm the session with LeetCode; see checkError.";
+                }
+
+                return jsonText({
+                    configured: true,
+                    signedIn,
+                    username,
+                    expiresAt: info.expiresAt?.toISOString(),
+                    daysLeft: info.daysLeft,
+                    expired: info.expired,
+                    expirySource: info.source,
+                    expiryUnknownReason: info.reason,
+                    checkError,
+                    advice
+                });
+            }
+        );
+
         // User profile tool
         this.server.tool(
             "get_user_profile",

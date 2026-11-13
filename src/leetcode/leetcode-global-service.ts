@@ -13,8 +13,12 @@ import { GraphQLRequest } from "./favorite-api.js";
 import { SEARCH_PROBLEMS_QUERY } from "./graphql/global/search-problems.js";
 import { SOLUTION_ARTICLE_DETAIL_QUERY } from "./graphql/global/solution-article-detail.js";
 import { SOLUTION_ARTICLES_QUERY } from "./graphql/global/solution-articles.js";
-import { LeetCodeBaseService } from "./leetcode-base-service.js";
+import {
+    LeetCodeBaseService,
+    type RandomProblem
+} from "./leetcode-base-service.js";
 import * as questionLookupApi from "./question-lookup-api.js";
+import { inspectSessionCookie, type SessionInfo } from "./session-info.js";
 
 /**
  * LeetCode Global API Service Implementation
@@ -428,6 +432,135 @@ export class LeetCodeGlobalService implements LeetCodeBaseService {
         throw new Error("Notes feature is not supported in LeetCode Global");
     }
 
+    async pickRandomProblem(options: {
+        difficulty?: string;
+        tag?: string;
+    }): Promise<RandomProblem> {
+        const unsolvedOnly = this.isAuthenticated();
+        const filters: Record<string, unknown> = {};
+        if (options.difficulty) {
+            filters.difficulty = options.difficulty.toUpperCase();
+        }
+        if (options.tag) {
+            filters.tags = [options.tag];
+        }
+        if (unsolvedOnly) {
+            filters.status = "NOT_STARTED";
+        }
+        const query = `
+            query ($limit: Int, $skip: Int, $filters: QuestionListFilterInput) {
+                questionList(categorySlug: "", limit: $limit, skip: $skip, filters: $filters) {
+                    totalNum
+                    data { titleSlug title difficulty isPaidOnly topicTags { slug } }
+                }
+            }`;
+        const page = async (skip: number, limit: number) => {
+            const response = await this.leetCodeApi.graphql({
+                query,
+                variables: { limit, skip, filters }
+            });
+            return response?.data?.questionList;
+        };
+
+        const total = Number((await page(0, 1))?.totalNum ?? 0);
+        if (!total) {
+            throw new Error(
+                `No ${unsolvedOnly ? "unsolved " : ""}problems match difficulty '${options.difficulty ?? "any"}' and topic '${options.tag ?? "any"}'`
+            );
+        }
+        const pageSize = 50;
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const skip = Math.floor(
+                Math.random() * Math.max(1, total - pageSize + 1)
+            );
+            const free = ((await page(skip, pageSize))?.data ?? []).filter(
+                (q: any) => !q.isPaidOnly
+            );
+            if (free.length) {
+                const q = free[Math.floor(Math.random() * free.length)];
+                const slugs = (q.topicTags ?? []).map((t: any) => t.slug);
+                // LeetCode ignores unknown tags instead of failing, so check.
+                if (options.tag && !slugs.includes(options.tag)) {
+                    throw new Error(
+                        `Unknown topic '${options.tag}'. Use a LeetCode topic tag slug such as 'graph', 'dynamic-programming' or 'sliding-window'.`
+                    );
+                }
+                return {
+                    titleSlug: q.titleSlug,
+                    title: q.title,
+                    difficulty: q.difficulty,
+                    topicTags: (q.topicTags ?? []).map((t: any) => t.slug),
+                    unsolvedOnly
+                };
+            }
+        }
+        throw new Error("Only premium problems match these filters");
+    }
+
+    /** Problems per GraphQL request when reading notes in bulk. */
+    private static readonly NOTE_BATCH_SIZE = 50;
+
+    async fetchProblemNote(titleSlug: string): Promise<string | null> {
+        const notes = await this.fetchProblemNotes([titleSlug]);
+        return notes[titleSlug] ?? null;
+    }
+
+    async fetchProblemNotes(
+        titleSlugs: string[]
+    ): Promise<Record<string, string | null>> {
+        this.requireAuthentication("read problem notes");
+        const result: Record<string, string | null> = {};
+        const unique = [...new Set(titleSlugs)];
+        const size = LeetCodeGlobalService.NOTE_BATCH_SIZE;
+
+        for (let start = 0; start < unique.length; start += size) {
+            const batch = unique.slice(start, start + size);
+            // One aliased field per problem: q0: question(titleSlug: $s0) { note }
+            const params = batch.map((_, i) => `$s${i}: String!`).join(", ");
+            const fields = batch
+                .map((_, i) => `q${i}: question(titleSlug: $s${i}) { note }`)
+                .join("\n");
+            const variables = Object.fromEntries(
+                batch.map((slug, i) => [`s${i}`, slug])
+            );
+            const response = await this.leetCodeApi.graphql({
+                query: `query (${params}) {\n${fields}\n}`,
+                variables
+            });
+            batch.forEach((slug, i) => {
+                const note = response?.data?.[`q${i}`]?.note;
+                result[slug] = typeof note === "string" && note ? note : null;
+            });
+        }
+        return result;
+    }
+
+    async updateProblemNote(titleSlug: string, content: string): Promise<void> {
+        this.requireAuthentication("update problem notes");
+        const response = await this.leetCodeApi.graphql({
+            query: `
+                mutation ($titleSlug: String!, $content: String!) {
+                    updateNote(titleSlug: $titleSlug, content: $content) {
+                        ok
+                        error
+                    }
+                }
+            `,
+            variables: { titleSlug, content }
+        });
+        const outcome = response?.data?.updateNote;
+        if (!outcome) {
+            throw new Error(
+                "LeetCode did not accept the note update (is LEETCODE_SESSION still valid?)"
+            );
+        }
+        if (!outcome.ok) {
+            throw new Error(
+                `LeetCode rejected the note update: ${outcome.error || "unknown error"}`
+            );
+        }
+    }
+
     async runCode(params: {
         titleSlug: string;
         questionId: string;
@@ -640,6 +773,12 @@ export class LeetCodeGlobalService implements LeetCodeBaseService {
             !!this.credential.csrf &&
             !!this.credential.session
         );
+    }
+
+    inspectSession(): SessionInfo | undefined {
+        return this.credential?.session
+            ? inspectSessionCookie(this.credential.session)
+            : undefined;
     }
 
     isCN(): boolean {

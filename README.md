@@ -18,6 +18,9 @@ The LeetCode MCP Server is a [Model Context Protocol (MCP)](https://modelcontext
 - 🔒 **​Private Data Access**: Create and query user notes, manage problem lists, track problem-solving progress, and analyze submission details (AC/WA analysis)
 - 🔍 **Advanced Search Capabilities**: Filter problems by tags, difficulty levels, categories, and keywords
 - 📅 **Daily Challenge Access**: Easily access daily challenge problems
+- 🎓 **Study Prompts**: `daily` coaching, `review` of your accepted code, and timed `mock-interview` sessions (see [Prompts](#prompts))
+- 🐞 **Debuggable Failures**: Failed runs and submissions include the failing test case and your numbered code, so the assistant helps you fix your solution (see [Debugging failed runs](#debugging-failed-runs))
+- 📝 **Study Notes on Global**: Save and search structured notes on your LeetCode problems (see [Study notes](#study-notes-leetcode-global))
 
 ## Prerequisites
 
@@ -252,6 +255,7 @@ npx -y @jinzcdev/leetcode-mcp-server --transport http --port 3000
 > - `LEETCODE_HTTP_ENDPOINT`: HTTP endpoint path when using Streamable HTTP (default: `/mcp`)
 > - `LEETCODE_HTTP_AUTH_TOKEN`: Bearer token required on the HTTP endpoint (default: empty, no auth)
 > - `LEETCODE_OAUTH_*` and `LEETCODE_HTTP_TRUST_PROXY`: OAuth settings, see [OAuth authentication](#oauth-authentication)
+> - `LEETCODE_CACHE_TTL_SECONDS`: How long to cache problems and solutions (default: `21600`, `0` disables), see [Caching](#caching)
 >
 > **Priority Note**:
 > Command-line arguments take precedence over environment variables when both are specified. For example:
@@ -338,6 +342,22 @@ fly logs --no-tail | grep -E 'OAuth enabled|Bearer token'
 ```
 
 If the second command prints anything other than `401`, no authentication is enabled. Set the secrets before using the server.
+
+`fly.toml` also defines a health check on `/health`, which answers without authentication, so Fly can monitor the app without touching `/mcp`. Check it with `curl $APP/health`.
+
+#### Keeping your LeetCode session working
+
+`LEETCODE_SESSION` expires every few weeks, and expired cookies make account tools fail. The server logs the expiry date at startup and warns in the last 7 days:
+
+```bash
+fly logs --no-tail | grep 'LeetCode session'
+```
+
+You can also ask your assistant to run `get_session_status`, which checks the cookie with LeetCode and tells you how many days are left. To renew it, copy a fresh `LEETCODE_SESSION` cookie from your browser and run `fly secrets set LEETCODE_SESSION='<NEW_COOKIE>'`.
+
+#### Cold starts
+
+`fly.toml` lets Fly stop the machine when it's idle, which keeps costs down. MCP sessions live in memory, so after the machine stops your client has to reconnect; OAuth tokens stay valid, so ChatGPT doesn't ask you to approve again. If reconnecting bothers you, set `min_machines_running = 1` in `fly.toml` and redeploy. One machine then stays running and is billed all the time.
 
 #### Changing secrets
 
@@ -426,22 +446,26 @@ Replace the hostname with your app's `*.fly.dev` URL if you used a different app
 | **get_problem_submission_report** |   ✅   | ✅  |      ✅       | Provides detailed submission analysis for a specific problem |
 | **get_problem_progress**          |   ✅   | ✅  |      ✅       | Retrieves current user's problem-solving progress            |
 | **get_all_submissions**           |   ✅   | ✅  |      ✅       | Retrieves current user's submission history                  |
+| **get_session_status**            |   ✅   | ✅  |      ❌       | Reports when `LEETCODE_SESSION` expires and whether it works |
 
 ### Submissions
 
-| Tool                | Global | CN  | Auth Required | Description                                                   |
-| ------------------- | :----: | :-: | :-----------: | ------------------------------------------------------------- |
-| **run_code**        |   ✅   | ✅  |      ✅       | Runs code for a problem and polls `/check/` until finished    |
-| **submit_solution** |   ✅   | ✅  |      ✅       | Submits code for a problem and polls `/check/` until finished |
+| Tool                | Global | CN  | Auth Required | Description                                                                                    |
+| ------------------- | :----: | :-: | :-----------: | ---------------------------------------------------------------------------------------------- |
+| **run_code**        |   ✅   | ✅  |      ✅       | Runs code and waits for the result; adds a debugging `diagnosis` when a case fails             |
+| **submit_solution** |   ✅   | ✅  |      ✅       | Submits code and waits for the verdict; adds a `diagnosis` on failure, a note suggestion on AC |
 
 ### Notes
 
-| Tool             | Global | CN  | Auth Required | Description                                           |
-| ---------------- | :----: | :-: | :-----------: | ----------------------------------------------------- |
-| **search_notes** |   ❌   | ✅  |      ✅       | Searches for user notes with filtering options        |
-| **get_note**     |   ❌   | ✅  |      ✅       | Retrieves notes for a specific problem by question ID |
-| **create_note**  |   ❌   | ✅  |      ✅       | Creates a new note for a specific problem             |
-| **update_note**  |   ❌   | ✅  |      ✅       | Updates an existing note with new content             |
+| Tool                     | Global | CN  | Auth Required | Description                                                             |
+| ------------------------ | :----: | :-: | :-----------: | ----------------------------------------------------------------------- |
+| **search_notes**         |   ❌   | ✅  |      ✅       | Searches for user notes with filtering options                          |
+| **get_note**             |   ❌   | ✅  |      ✅       | Retrieves notes for a specific problem by question ID                   |
+| **create_note**          |   ❌   | ✅  |      ✅       | Creates a new note for a specific problem                               |
+| **update_note**          |   ❌   | ✅  |      ✅       | Updates an existing note with new content                               |
+| **get_problem_note**     |   ✅   | ❌  |      ✅       | Reads your note on a problem (the problem page's Notes panel)           |
+| **save_problem_note**    |   ✅   | ❌  |      ✅       | Appends a structured study note (approach, complexity, trick, mistakes) |
+| **search_problem_notes** |   ✅   | ❌  |      ✅       | Searches your notes across solved and attempted problems                |
 
 ### Problem Lists
 
@@ -461,6 +485,58 @@ Replace the hostname with your app's `*.fly.dev` URL if you used a different app
 | -------------------------- | :----: | :-: | :-----------: | -------------------------------------------------------------- |
 | **list_problem_solutions** |   ✅   | ✅  |      ❌       | Retrieves a list of community solutions for a specific problem |
 | **get_problem_solution**   |   ✅   | ✅  |      ❌       | Retrieves the complete content of a specific solution          |
+
+### Study helpers
+
+| Tool                 | Global | CN  | Auth Required | Description                                                            |
+| -------------------- | :----: | :-: | :-----------: | ---------------------------------------------------------------------- |
+| **get_elapsed_time** |   ✅   | ✅  |      ❌       | Current time and minutes since a start time, for timed mock interviews |
+
+## Prompts
+
+The server also provides prompts, which MCP clients show as slash commands. In Claude Code they appear as `/mcp__leetcode__daily` and so on, where `leetcode` is the name you gave the server.
+
+| Prompt             | Arguments                             | Auth Required | What it does                                                                                                                                                       |
+| ------------------ | ------------------------------------- | :-----------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **daily**          | —                                     |      ❌       | Loads today's daily problem and coaches you Socratically: questions and hints one at a time, no solution or topic tags until you ask.                              |
+| **review**         | `slug`                                |      ✅       | Loads your latest accepted submission for a problem and reviews its correctness, edge cases, complexity and style, with line references.                           |
+| **mock-interview** | `difficulty`, `topic` (both optional) |   optional    | Picks a random free problem (only ones you haven't attempted when signed in on Global), then runs a time-boxed interview with follow-up questions and a scorecard. |
+
+`difficulty` is `easy`, `medium` (default) or `hard`, which sets the time box to 25, 40 or 50 minutes. `topic` is a LeetCode topic tag such as `graph`, `sliding-window` or `dynamic-programming`; common names and abbreviations like `dp` or `bfs` also work, and clients that support completion suggest values as you type.
+
+## Debugging failed runs
+
+When `run_code` or `submit_solution` fails (Wrong Answer, Time Limit Exceeded, a runtime or compile error), the response includes a `diagnosis` alongside LeetCode's raw result:
+
+- the verdict and how many test cases passed;
+- the failing test case: its input, the expected output, your output and anything you printed (for `run_code`, which of the cases failed);
+- the error message, for runtime and compile errors;
+- your code with line numbers;
+- guidance asking the assistant to help you find the bug in your code (point at lines, explain the failing input, suggest the smallest fix) instead of rewriting your solution.
+
+## Study notes (LeetCode Global)
+
+On LeetCode Global every problem has a personal **Notes** panel. After an accepted submission, `submit_solution` suggests saving a note, and `save_problem_note` appends a dated entry to that problem's note:
+
+```text
+=== 2026-11-13 · python3 · Easy ===
+Approach: Hash map from value to index, one pass
+Complexity: O(n) time, O(n) space
+Trick: Look up target - x before inserting x
+Mistakes: Inserted before checking, so an element matched itself
+Attempts: 1 failed before AC (Wrong Answer); AC 52 ms
+Tags: array, hash-table
+```
+
+The approach, complexity, trick and mistakes come from the conversation. The server adds the date, difficulty, tags and attempt history from your submissions. Earlier entries are kept, and the notes show up on the problem page on leetcode.com.
+
+`search_problem_notes` searches these notes across every problem you've solved or attempted, by keywords (for example `monotonic stack`), topic tag and difficulty. LeetCode has no note-search API on Global, so it reads your notes in batches and can take a few seconds.
+
+On LeetCode CN, use the existing `create_note` and `search_notes` tools instead.
+
+## Caching
+
+Problems, solution articles and the daily challenge are cached in memory, so repeated lookups are fast and make fewer requests to LeetCode. Problems and solutions are kept for 6 hours (solution lists for at most 1 hour, the daily challenge for 15 minutes). Saving a note or submitting a solution refreshes that problem. Set `LEETCODE_CACHE_TTL_SECONDS` to change the time, or `0` to turn caching off.
 
 ## Tool Parameters
 
@@ -525,6 +601,7 @@ Replace the hostname with your app's `*.fly.dev` URL if you used a different app
   - `lang`: Programming language filter (string, optional, CN only)
   - `status`: Submission status filter (enum: "AC", "WA", optional, CN only)
   - `lastKey`: Pagination token for retrieving next page (string, optional, CN only)
+- **get_session_status** - Reports whether the configured `LEETCODE_SESSION` cookie works and when it expires (no parameters; also works without a session)
 
 ### Submissions
 
@@ -536,6 +613,7 @@ Replace the hostname with your app's `*.fly.dev` URL if you used a different app
   - `dataInput`: Custom input to run (string, optional)
   - `timeoutMs`: Polling timeout in milliseconds (number, optional, default: 120000)
   - `pollIntervalMs`: Polling interval in milliseconds (number, optional, default: 1500)
+  - Response: LeetCode's raw `check` result, plus a `diagnosis` when any test case fails (see [Debugging failed runs](#debugging-failed-runs))
 
 - **submit_solution** - Submits code for a specific problem and waits until finished (requires authentication)
 
@@ -544,6 +622,7 @@ Replace the hostname with your app's `*.fly.dev` URL if you used a different app
   - `typedCode`: Source code to submit (string, required)
   - `timeoutMs`: Polling timeout in milliseconds (number, optional, default: 120000)
   - `pollIntervalMs`: Polling interval in milliseconds (number, optional, default: 1500)
+  - Response: LeetCode's raw `check` result, plus a `diagnosis` on failure or a `nextStep` suggesting a note on Accepted
 
 ### Notes
 
@@ -565,9 +644,31 @@ Replace the hostname with your app's `*.fly.dev` URL if you used a different app
   - `summary`: An optional short summary or title for the note (string, optional)
 
 - **update_note** - Updates an existing note with new content or summary
+
   - `noteId`: The ID of the note to update (string, required)
   - `content`: The new content for the note, supports markdown format (string, required)
   - `summary`: An optional new short summary or title for the note (string, optional)
+
+- **get_problem_note** - Reads your note on a problem (LeetCode Global)
+
+  - `titleSlug`: The URL slug/identifier of the problem (string, required)
+
+- **save_problem_note** - Saves a structured study note on a problem (LeetCode Global)
+
+  - `titleSlug`: The URL slug/identifier of the problem (string, required)
+  - `approach`: The approach in a sentence or two (string, required)
+  - `complexity`: Time and space complexity (string, required)
+  - `trick`: The key insight (string, required)
+  - `mistakes`: Mistakes made on the way (string, optional)
+  - `lang`: Language of the accepted solution (string, optional)
+  - `mode`: `append` adds a dated entry, `replace` overwrites the note (enum, optional, default: `append`)
+
+- **search_problem_notes** - Searches your notes across solved and attempted problems (LeetCode Global)
+
+  - `query`: Keywords that must all appear in the note or title (string, optional)
+  - `tag`: Topic tag slug or name (string, optional)
+  - `difficulty`: `EASY`, `MEDIUM` or `HARD` (enum, optional)
+  - `limit`: Maximum results (number, optional, default: 20)
 
 ### Problem Lists
 
@@ -634,6 +735,11 @@ Problem lists are identified by their `favoriteSlug`, the path segment after `/p
 - **get_problem_solution** - Retrieves the complete content of a specific solution
   - `topicId`: Unique topic ID of the solution (string, required, Global only)
   - `slug`: Unique slug/identifier of the solution (string, required, CN only)
+
+### Study helpers
+
+- **get_elapsed_time** - Returns the current time and the minutes elapsed since a start time
+  - `startedAt`: ISO 8601 start time, e.g. `2026-11-13T19:30:00.000Z` (string, optional)
 
 ## Available Resources
 

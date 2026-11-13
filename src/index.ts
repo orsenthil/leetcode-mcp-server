@@ -7,8 +7,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { OAuthConfig } from "./auth/oauth-router.js";
 import { MAX_TOOL_INPUT_ARRAY_ITEMS } from "./common/constants.js";
+import { withCache } from "./leetcode/cache.js";
 import { LeetCodeBaseService } from "./leetcode/leetcode-base-service.js";
 import { LeetCodeServiceFactory } from "./leetcode/leetcode-service-factory.js";
+import { registerStudyPrompts } from "./mcp/prompts/study-prompts.js";
 import { registerProblemResources } from "./mcp/resources/problem-resources.js";
 import { registerSolutionResources } from "./mcp/resources/solution-resources.js";
 import { registerContestTools } from "./mcp/tools/contest-tools.js";
@@ -22,6 +24,9 @@ import { startStreamableHttpTransport } from "./transport/streamable-http.js";
 import logger from "./utils/logger.js";
 
 type TransportMode = "stdio" | "http";
+
+/** Problems and solution articles rarely change: cache them for 6 hours. */
+const DEFAULT_CACHE_TTL_SECONDS = 6 * 60 * 60;
 
 /**
  * Parses and validates command line arguments for the LeetCode MCP Server.
@@ -71,6 +76,7 @@ function parseArgs() {
     LEETCODE_HTTP_ENDPOINT         Same as --endpoint
     LEETCODE_HTTP_AUTH_TOKEN       Same as --auth-token
     LEETCODE_HTTP_TRUST_PROXY      Number of reverse-proxy hops to trust for client IPs (e.g. 1 on Fly.io)
+    LEETCODE_CACHE_TTL_SECONDS     How long to cache problems and solutions (default: 21600; 0 disables)
 
   OAuth (Streamable HTTP only; enabled when LEETCODE_OAUTH_PASSWORD is set):
     LEETCODE_OAUTH_PASSWORD        Password you type to approve a client
@@ -94,6 +100,9 @@ function parseArgs() {
         host: args.host || process.env.LEETCODE_HTTP_HOST || "127.0.0.1",
         endpoint: args.endpoint || process.env.LEETCODE_HTTP_ENDPOINT || "/mcp",
         trustProxy: Number(process.env.LEETCODE_HTTP_TRUST_PROXY || 0),
+        cacheTtlSeconds: Number(
+            process.env.LEETCODE_CACHE_TTL_SECONDS ?? DEFAULT_CACHE_TTL_SECONDS
+        ),
         oauth: parseOAuthConfig(),
         authToken: (
             args["auth-token"] ||
@@ -118,6 +127,16 @@ function parseArgs() {
         options.port > 65535
     ) {
         logger.error("The port must be an integer between 1 and 65535");
+        process.exit(1);
+    }
+
+    if (
+        !Number.isFinite(options.cacheTtlSeconds) ||
+        options.cacheTtlSeconds < 0
+    ) {
+        logger.error(
+            "LEETCODE_CACHE_TTL_SECONDS must be a number of seconds (0 disables caching)"
+        );
         process.exit(1);
     }
 
@@ -246,7 +265,58 @@ function createMcpServer(leetcodeService: LeetCodeBaseService): McpServer {
     registerProblemResources(server, leetcodeService);
     registerSolutionResources(server, leetcodeService);
 
+    registerStudyPrompts(server, leetcodeService);
+
     return server;
+}
+
+/** Days before expiry at which the startup log turns into a warning. */
+const SESSION_WARN_DAYS = 7;
+
+/**
+ * Logs when the configured LeetCode session cookie expires, so an expired
+ * cookie shows up in the logs instead of as silent authentication failures.
+ */
+function logSessionExpiry(service: LeetCodeBaseService): void {
+    const info = service.inspectSession();
+    if (!info) {
+        logger.info(
+            "No LEETCODE_SESSION configured; account tools are disabled"
+        );
+        return;
+    }
+    if (!service.isAuthenticated()) {
+        logger.warn(
+            "LEETCODE_SESSION is set but no CSRF token could be obtained; account tools are disabled"
+        );
+    }
+    if (!info.expiresAt) {
+        logger.info(
+            "LeetCode session expiry unknown (%s; claims: %s)",
+            info.reason,
+            (info.claimNames ?? []).join(", ") || "none"
+        );
+        return;
+    }
+    const when = info.expiresAt.toISOString();
+    if (info.expired) {
+        logger.error(
+            "LeetCode session EXPIRED on %s. Set a fresh LEETCODE_SESSION cookie.",
+            when
+        );
+    } else if ((info.daysLeft ?? 0) <= SESSION_WARN_DAYS) {
+        logger.warn(
+            "LeetCode session expires on %s (%d days left). Renew LEETCODE_SESSION soon.",
+            when,
+            info.daysLeft
+        );
+    } else {
+        logger.info(
+            "LeetCode session expires on %s (%d days left)",
+            when,
+            info.daysLeft
+        );
+    }
 }
 
 /**
@@ -255,11 +325,14 @@ function createMcpServer(leetcodeService: LeetCodeBaseService): McpServer {
 async function main() {
     const options = parseArgs();
 
-    const leetcodeService: LeetCodeBaseService =
+    const leetcodeService: LeetCodeBaseService = withCache(
         await LeetCodeServiceFactory.createService(
             options.site,
             options.session
-        );
+        ),
+        { ttlMs: options.cacheTtlSeconds * 1000 }
+    );
+    logSessionExpiry(leetcodeService);
 
     if (options.transport === "http") {
         await startStreamableHttpTransport({

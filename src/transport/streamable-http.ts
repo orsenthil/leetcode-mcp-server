@@ -43,6 +43,16 @@ export async function startStreamableHttpTransport(
     if (trustProxy) {
         app.set("trust proxy", trustProxy);
     }
+
+    // Unauthenticated liveness check for load balancers (e.g. Fly.io checks),
+    // so they never need to touch the MCP endpoint.
+    const startedAt = Date.now();
+    app.get("/health", (_req, res) => {
+        res.json({
+            status: "ok",
+            uptimeSeconds: Math.round((Date.now() - startedAt) / 1000)
+        });
+    });
     const transports: Record<string, StreamableHTTPServerTransport> = {};
 
     const mcpPostHandler = async (req: McpRequest, res: McpResponse) => {

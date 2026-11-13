@@ -19,8 +19,12 @@ import {
 import { SEARCH_PROBLEMS_QUERY } from "./graphql/cn/search-problems.js";
 import { SOLUTION_ARTICLE_DETAIL_QUERY } from "./graphql/cn/solution-article-detail.js";
 import { SOLUTION_ARTICLES_QUERY } from "./graphql/cn/solution-articles.js";
-import { LeetCodeBaseService } from "./leetcode-base-service.js";
+import {
+    LeetCodeBaseService,
+    type RandomProblem
+} from "./leetcode-base-service.js";
 import * as questionLookupApi from "./question-lookup-api.js";
+import { inspectSessionCookie, type SessionInfo } from "./session-info.js";
 
 /**
  * LeetCode CN API Service Implementation
@@ -534,6 +538,68 @@ export class LeetCodeCNService implements LeetCodeBaseService {
      * @param summary - Optional new summary of the note
      * @returns Promise resolving to the updated note data
      */
+    async pickRandomProblem(options: {
+        difficulty?: string;
+        tag?: string;
+    }): Promise<RandomProblem> {
+        const tags = options.tag ? [options.tag] : undefined;
+        const first = await this.searchProblems(
+            undefined,
+            tags,
+            options.difficulty,
+            1,
+            0
+        );
+        const total = Number(first?.total ?? 0);
+        if (!total) {
+            throw new Error(
+                `No problems match difficulty '${options.difficulty ?? "any"}' and topic '${options.tag ?? "any"}'`
+            );
+        }
+        const skip = Math.floor(Math.random() * total);
+        const result = await this.searchProblems(
+            undefined,
+            tags,
+            options.difficulty,
+            1,
+            skip
+        );
+        const q = result?.questions?.[0];
+        if (!q) {
+            throw new Error("Could not pick a problem");
+        }
+        return {
+            titleSlug: q.titleSlug,
+            title: q.title,
+            difficulty: q.difficulty,
+            topicTags: q.topicTags ?? [],
+            unsolvedOnly: false
+        };
+    }
+
+    async fetchProblemNote(_titleSlug: string): Promise<string | null> {
+        throw new Error(
+            "Per-problem notes are LeetCode Global only; use the note tools (search_notes, create_note) on LeetCode CN"
+        );
+    }
+
+    async fetchProblemNotes(
+        _titleSlugs: string[]
+    ): Promise<Record<string, string | null>> {
+        throw new Error(
+            "Per-problem notes are LeetCode Global only; use the note tools (search_notes, create_note) on LeetCode CN"
+        );
+    }
+
+    async updateProblemNote(
+        _titleSlug: string,
+        _content: string
+    ): Promise<void> {
+        throw new Error(
+            "Per-problem notes are LeetCode Global only; use the note tools (search_notes, create_note) on LeetCode CN"
+        );
+    }
+
     async updateUserNote(
         noteId: string,
         content: string,
@@ -776,6 +842,12 @@ export class LeetCodeCNService implements LeetCodeBaseService {
             !!this.credential.csrf &&
             !!this.credential.session
         );
+    }
+
+    inspectSession(): SessionInfo | undefined {
+        return this.credential?.session
+            ? inspectSessionCookie(this.credential.session)
+            : undefined;
     }
 
     isCN(): boolean {

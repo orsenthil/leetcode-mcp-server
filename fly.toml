@@ -25,6 +25,9 @@ primary_region = "sjc"
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
+  # MCP sessions live in memory, so when an idle machine stops, clients must
+  # reconnect (OAuth tokens stay valid). Set to 1 to keep one machine always
+  # running if reconnects bother you; it then bills continuously.
   min_machines_running = 0
   processes = ["app"]
 
@@ -35,6 +38,14 @@ primary_region = "sjc"
 
   [http_service.http_options]
     idle_timeout = 600
+
+  # Unauthenticated liveness endpoint, so checks never touch /mcp.
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    timeout = "5s"
 
 [[vm]]
   size = "shared-cpu-1x"

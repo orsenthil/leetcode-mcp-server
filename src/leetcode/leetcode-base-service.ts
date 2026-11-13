@@ -2,6 +2,16 @@ import type {
     FetchFavoriteQuestionsOptions,
     ReorderFavoriteQuestionsOptions
 } from "./favorite-api.js";
+import type { SessionInfo } from "./session-info.js";
+
+export interface RandomProblem {
+    titleSlug: string;
+    title: string;
+    difficulty: string;
+    topicTags: string[];
+    /** Whether only unsolved (not started) problems were considered. */
+    unsolvedOnly: boolean;
+}
 
 /**
  * Base interface for LeetCode API service implementations.
@@ -159,6 +169,14 @@ export interface LeetCodeBaseService {
     isAuthenticated(): boolean;
 
     /**
+     * Describes the configured session cookie (notably when it expires),
+     * decoded locally without contacting LeetCode.
+     *
+     * @returns Session details, or undefined when no session is configured
+     */
+    inspectSession(): SessionInfo | undefined;
+
+    /**
      * Runs code against LeetCode's interpreter (Run) and polls the check endpoint
      * until a non-pending state is reached.
      *
@@ -294,6 +312,49 @@ export interface LeetCodeBaseService {
         content: string,
         summary: string
     ): Promise<any>;
+
+    /**
+     * Reads the authenticated user's per-problem note (the "Notes" panel on
+     * a problem page). Only available on LeetCode Global.
+     *
+     * @param titleSlug - Problem slug
+     * @returns The note text, or null when the problem has no note
+     */
+    fetchProblemNote(titleSlug: string): Promise<string | null>;
+
+    /**
+     * Picks a random free problem matching the filters. When authenticated on
+     * LeetCode Global, only problems the user has not started are considered.
+     *
+     * @param options.difficulty - EASY, MEDIUM or HARD
+     * @param options.tag - Topic tag slug (e.g., 'graph')
+     * @returns The chosen problem's slug, title, difficulty and tags
+     * @throws Error when no problem matches
+     */
+    pickRandomProblem(options: {
+        difficulty?: string;
+        tag?: string;
+    }): Promise<RandomProblem>;
+
+    /**
+     * Reads the per-problem notes of many problems in batched requests.
+     * Only available on LeetCode Global.
+     *
+     * @param titleSlugs - Problem slugs
+     * @returns Map of slug to note text (null when the problem has no note)
+     */
+    fetchProblemNotes(
+        titleSlugs: string[]
+    ): Promise<Record<string, string | null>>;
+
+    /**
+     * Replaces the authenticated user's per-problem note. Only available on
+     * LeetCode Global.
+     *
+     * @param titleSlug - Problem slug
+     * @param content - The full new note text
+     */
+    updateProblemNote(titleSlug: string, content: string): Promise<void>;
 
     /**
      * Retrieves the authenticated user's problem lists ("favorites").
